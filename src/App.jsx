@@ -8,9 +8,13 @@ export default function App() {
   // ─── API keys ──────────────────────────────────────────────────────────────
   const [groqKey]   = useState(import.meta.env.VITE_GROQ_API_KEY);
   const [groqModel] = useState(import.meta.env.VITE_GROQ_MODEL);
+  const [voiceModel] = useState(import.meta.env.VITE_VOICE_MODEL || 'canopylabs/orpheus-v1-english');
+  const [voiceName]  = useState(import.meta.env.VITE_VOICE_NAME || 'hannah');
 
   // ─── App state ─────────────────────────────────────────────────────────────
   const [status, setStatus] = useState('idle'); // idle | listening | thinking | speaking
+  const [isAsleep, setIsAsleep] = useState(false);
+  const [isWakingUp, setIsWakingUp] = useState(false);
 
   // ─── Chat history ──────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([
@@ -33,6 +37,10 @@ export default function App() {
   const streamRef               = useRef(null);
   const silenceCheckIntervalRef = useRef(null);
   const shouldTranscribeRef     = useRef(true);
+  const lastActivityTimeRef     = useRef(Date.now());
+  const isWakingUpRef           = useRef(false);
+  const isPausingRef            = useRef(false);
+  const hasProactiveTriggeredRef = useRef(false);
 
   // Audio playback
   const audioQueueRef       = useRef([]);
@@ -40,6 +48,7 @@ export default function App() {
   const currentAudioRef     = useRef(null);
   const audioCtxRef         = useRef(null);
   const analyserRef         = useRef(null);
+  const expressionTimeoutRef = useRef(null);
 
   // Stream parsing (line-buffered)
   const streamBufferRef  = useRef('');  // Full visible buffer (for UI)
@@ -62,6 +71,65 @@ export default function App() {
       startRecording();
     }
   }, [isContinuousMic]);
+
+  const isAsleepRef = useRef(false);
+  useEffect(() => {
+    isAsleepRef.current = isAsleep;
+  }, [isAsleep]);
+
+  const recordUserActivity = () => {
+    lastActivityTimeRef.current = Date.now();
+    hasProactiveTriggeredRef.current = false;
+  };
+
+  const recordSystemActivity = () => {
+    lastActivityTimeRef.current = Date.now();
+  };
+
+  const wakeUpAvatar = () => {
+    if (isAsleepRef.current) {
+      console.log('[App] ☀️ Wake up triggered!');
+      setIsAsleep(false);
+      setIsWakingUp(true);
+      setActiveAction('idle');
+    }
+  };
+
+  useEffect(() => {
+    isWakingUpRef.current = isWakingUp;
+    if (!isWakingUp) {
+      checkAndPlayQueue();
+    }
+  }, [isWakingUp]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // If we are currently talking, thinking, or in wakeup transition, reset the idle timer
+      if (isAsleep || isWakingUp || isBusyRef.current || status === 'speaking' || status === 'thinking') {
+        recordSystemActivity();
+        return;
+      }
+
+      const idleTime = Date.now() - lastActivityTimeRef.current;
+
+      // 30 seconds idle -> Raise proactive topic
+      if (idleTime >= 30000 && !hasProactiveTriggeredRef.current) {
+        hasProactiveTriggeredRef.current = true;
+        console.log('[Inactivity] 30s idle limit reached. Raising proactive topic.');
+        handleSendMessage('', true);
+        return;
+      }
+
+      // 60 seconds idle -> Sleep
+      if (idleTime >= 60000) {
+        console.log('[Inactivity] 60s idle limit reached. Going to sleep.');
+        setIsAsleep(true);
+        setActiveAction('yawning_and_sleeping');
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [isAsleep, isWakingUp, status]);
 
   // ─── Toggle continuous mic ─────────────────────────────────────────────────
   const toggleContinuousMic = () => {
@@ -181,6 +249,11 @@ export default function App() {
         const loud = rms > SPEECH_THRESHOLD;
 
         if (loud) {
+          recordUserActivity();
+          if (isAsleepRef.current) {
+            console.log('[VAD] Speech detected while asleep. Waking up...');
+            wakeUpAvatar();
+          }
           if (!hasSpoken) {
             hasSpoken = true;
             speechStartTime = now;
@@ -308,10 +381,21 @@ export default function App() {
   };
 
   // ─── Send message to LLM ───────────────────────────────────────────────────
-  const handleSendMessage = async (text) => {
+  const handleSendMessage = async (text, isProactive = false) => {
     const query = text || textInput;
-    if (!query.trim()) return;
+    if (!query.trim() && !isProactive) return;
     if (!groqKey) { alert('Groq API key missing.'); return; }
+
+    if (isProactive) {
+      recordSystemActivity();
+    } else {
+      recordUserActivity();
+    }
+
+    if (isAsleep) {
+      console.log('[LLM] Avatar is asleep. Triggering wakeup sequence.');
+      wakeUpAvatar();
+    }
 
     stopSpeechAndQueue();
     initAudioContext();
@@ -320,12 +404,17 @@ export default function App() {
     queryGenerationRef.current++;
     const myGen = queryGenerationRef.current;
     isBusyRef.current = true;
-    console.log(`[LLM] Generation #${myGen} — Query: "${query}"`);
+    console.log(`[LLM] Generation #${myGen} — Query: "${isProactive ? 'PROACTIVE_TRIGGER' : query}"`);
 
-    setMessages(prev => [...prev, { role: 'user', content: query }]);
+    if (!isProactive) {
+      setMessages(prev => [...prev, { role: 'user', content: query }]);
+    }
     setTextInput('');
     setStatus('thinking');
-    setActiveAction('think');
+    // If we are waking up, let the wakeup animation run first, otherwise show think animation
+    if (!isAsleep) {
+      setActiveAction('think');
+    }
 
     // Reset stream buffers
     streamBufferRef.current = '';
@@ -341,38 +430,62 @@ export default function App() {
 
       const systemPrompt = `You are Sana, a warm, expressive, female AI avatar who communicates both verbally and physically.
 
+CONVERSATION STYLE & TONE (CRITICAL):
+- Talk simple, emotional, warm, and natural.
+- Always address the user respectfully as 'Sir' (सर in Hindi, e.g. "आपका आज का दिन कैसा रहा सर?").
+- Keep your responses very short, concise, and focused on making an emotional connection.
+- Avoid asking multiple questions in a single response. Ask at most one simple question, or just make a warm statement.
+- Keep total response to ONLY 1-2 segments (never exceed 3 segments).
+
+CRITICAL RULE ON TEXT & ACTIONS:
+- ONLY the three talking actions ('talking_happy', 'talking_sadly', 'talking_lips_moment') are allowed to have spoken text/speech.
+- Any other action (e.g. 'touching_her_hair', 'Wink_great_with_hand', 'shy', 'surprised_and_smiling', 'think', 'moving hand', 'playing', 'blink', 'laugh', 'yawning_and_sleeping') must be written as a direct, textless physical gesture (expression-only, e.g. '[action:touching_her_hair]' with NO text).
+- If you want to do a physical action AND talk, you MUST split it into two segments:
+  Segment 1: The physical action (with no text), e.g., [action:touching_her_hair]
+  Segment 2: A talking action (with text), e.g., [action:talking_happy] today I styled my hair!
+
 RESPONSE FORMAT — MANDATORY:
-- Every response is made of 1-4 line-separated SEGMENTS
-- Each segment: [action:NAME][emotion:NAME] spoken text here
+- Every response is made of 1-3 line-separated SEGMENTS
+- Each segment must start with: [action:ACTION_NAME]
 - Add [sfx] only for laugh or yawning_and_sleeping actions to play real sound effects
-- If you only want to react physically (no words), leave out the text part
 
-AVAILABLE ACTIONS:
-think, laugh, playing, blink, yawning_and_sleeping, moving hand, shy, surprised_and_smiling, touching_her_hair, Wink_great_with_hand
+AVAILABLE TALKING ACTIONS (Speech allowed):
+- talking_happy: Talking with a happy/joyful expression.
+- talking_sadly: Talking with a sad/gloom expression.
+- talking_lips_moment: General talking expression.
 
-AVAILABLE EMOTIONS:
-happy, sad, normal, excited, confused
+AVAILABLE PHYSICAL ACTIONS (NO text allowed, must be empty text segments):
+- Wink_great_with_hand: Winking, greeting, or waving hand.
+- touching_her_hair: Running hand through her hair, styling hair.
+- shy: Looking shy, acting cute, blushing.
+- surprised_and_smiling: Eyes widening with happy surprise, then transitioning to a warm smile.
+- think: Contemplative, looking up/away.
+- moving hand: Gesticulating with hands to explain something.
+- playing: Fidgeting, playing with hands.
+- blink: A simple quick blink.
+- laugh: Giggling or laughing. (Supports [sfx]).
+- yawning_and_sleeping: Yawning and showing sleepiness. (Supports [sfx]).
 
 GREETING RULE (IMPORTANT):
-- If the user says hi, hello, or greets you, always start your response with the [action:Wink_great_with_hand] action to wave and greet them (e.g. "[action:Wink_great_with_hand][emotion:happy] Hello! Nice to meet you!").
+- If the user greets you, start your response with a textless greet segment, followed by a talking segment:
+  [action:Wink_great_with_hand]
+  [action:talking_happy] Hello! Nice to meet you!
 
 LAUGH RULES (IMPORTANT):
-- "[action:laugh][sfx] ha, that is funny!" → SFX laugh plays, voice says the text WITHOUT [laughs] tag
 - "[action:laugh][sfx]" (no text) → ONLY the SFX plays, no speech at all
-- "that is funny [laughs]!" → No SFX, voice laughs inline, use talking_happy animation (no [action:laugh])
-
-EXPRESSION-ONLY (no TTS) EXAMPLES:
-- "[action:blink][emotion:confused]" → just blinks, no talking
-- "[action:shy][emotion:happy]" → shy expression, no talking
 
 FULL EXAMPLES:
-[action:think][emotion:normal] Hmm, let me think about that for a moment...
-[action:laugh][sfx][emotion:happy] Oh that is absolutely hilarious!
-[action:yawning_and_sleeping][sfx][emotion:sad] I am so tired right now.
-[action:blink][emotion:confused]
+[action:Wink_great_with_hand]
+[action:talking_happy] Oh hi there! I'm so glad to talk to you.
+
+[action:touching_her_hair]
+[action:talking_happy] Do you like how I styled my hair today?
+
+[action:think]
+[action:talking_lips_moment] Hmm, let me think about that...
 
 In gender-conjugating languages like Hindi, always use feminine conjugations.
-Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
+Be natural, diverse in your physical animations, and very expressive. Keep total response to 1-3 segments.`;
 
       const responseStream = await groq.chat.completions.create({
         model:  groqModel,
@@ -384,7 +497,7 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
           ...messages
               .filter(m => m.role !== 'system' && m.content && m.content.trim())
               .map(m => ({ role: m.role, content: m.content })),
-          { role: 'user', content: query },
+          { role: 'user', content: isProactive ? "Raise a random warm/engaging conversational topic or ask a friendly question to check in on me. Be brief, warm, emotional, and natural." : query },
         ],
       });
 
@@ -456,29 +569,66 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
     const parsed = parseSegment(rawLine);
     if (!parsed) return;
 
-    const { text, action, emotion, playSfx } = parsed;
+    let { text, action, playSfx } = parsed;
 
-    const queueItem = {
-      id:       Date.now() + Math.random(),
-      text,
-      action,
-      emotion,
-      playSfx,
-      sfxUrl:   playSfx && action ? `/sfx/${action}.wav` : null,
-      audioUrl: null,
-      isLoaded: false,
-    };
+    // Detect greeting (hi, hello, etc.) to automatically greet with hand
+    const hasGreeting = text && /\b(hi|hello|hey|greetings|welcome|namaste|नमस्ते|हेलो)\b/i.test(text);
+    if (hasGreeting && action !== 'Wink_great_with_hand') {
+      console.log(`[Parser] Auto-detect greeting in text: "${text}". Setting action to Wink_great_with_hand.`);
+      action = 'Wink_great_with_hand';
+    }
 
-    console.log(`[Queue] Enqueuing segment:`, queueItem);
-    audioQueueRef.current.push(queueItem);
+    const isTalkingAction = action === 'talking_happy' || action === 'talking_sadly' || action === 'talking_lips_moment';
 
-    if (text) {
-      generateVoiceover(queueItem);
-    } else {
-      // Expression-only: no TTS needed — mark as ready immediately
-      console.log('[Queue] Expression-only segment — skipping TTS.');
-      queueItem.isLoaded = true;
+    if (text && action && !isTalkingAction) {
+      // Split into physical expression first, talking second
+      const exprItem = {
+        id:       Date.now() + Math.random(),
+        text:     '',
+        action,
+        playSfx,
+        sfxUrl:   playSfx && action ? `/sfx/${action}.wav` : null,
+        audioUrl: null,
+        isLoaded: true,
+      };
+
+      const talkItem = {
+        id:       Date.now() + Math.random() + 0.1,
+        text,
+        action:   null,
+        playSfx:  false,
+        sfxUrl:   null,
+        audioUrl: null,
+        isLoaded: false,
+      };
+
+      console.log(`[Queue] Splitting segment: physical action first:`, exprItem, `then talking:`, talkItem);
+      audioQueueRef.current.push(exprItem);
+      audioQueueRef.current.push(talkItem);
+      generateVoiceover(talkItem);
       checkAndPlayQueue();
+    } else {
+      const queueItem = {
+        id:       Date.now() + Math.random(),
+        text,
+        action,
+        playSfx,
+        sfxUrl:   playSfx && action ? `/sfx/${action}.wav` : null,
+        audioUrl: null,
+        isLoaded: false,
+      };
+
+      console.log(`[Queue] Enqueuing segment:`, queueItem);
+      audioQueueRef.current.push(queueItem);
+
+      if (text) {
+        generateVoiceover(queueItem);
+      } else {
+        // Expression-only: no TTS needed — mark as ready immediately
+        console.log('[Queue] Expression-only segment — skipping TTS.');
+        queueItem.isLoaded = true;
+        checkAndPlayQueue();
+      }
     }
   };
 
@@ -494,10 +644,10 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
           'Authorization': `Bearer ${groqKey}`,
         },
         body: JSON.stringify({
-          model:'canopylabs/orpheus-v1-english',
-          input:queueItem.text,
-          voice:'hannah',
-          response_format:'wav',
+          model:           voiceModel,
+          input:           queueItem.text,
+          voice:           voiceName,
+          response_format: 'wav',
         }),
       });
 
@@ -523,8 +673,16 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
 
   // ─── Queue player ──────────────────────────────────────────────────────────
   const checkAndPlayQueue = () => {
-    console.log(`[Queue] Check — length:${audioQueueRef.current.length}, playing:${isPlayingAudioRef.current}`);
+    console.log(`[Queue] Check — length:${audioQueueRef.current.length}, playing:${isPlayingAudioRef.current}, waking:${isWakingUpRef.current}, pausing:${isPausingRef.current}`);
     if (isPlayingAudioRef.current) return;
+    if (isWakingUpRef.current) {
+      console.log('[Queue] Blocked queue playback — waking up in progress.');
+      return;
+    }
+    if (isPausingRef.current) {
+      console.log('[Queue] Blocked queue playback — inter-segment pause in progress.');
+      return;
+    }
     if (audioQueueRef.current.length === 0) return;
 
     const next = audioQueueRef.current[0];
@@ -540,22 +698,23 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
   // ─── Play one segment ──────────────────────────────────────────────────────
   const playSegment = (item) => {
     console.log(`[Play] ▶️ Playing segment:`, item);
+    recordSystemActivity();
     isPlayingAudioRef.current = true;
     setStatus('speaking');
     setIsSpeaking(true);
 
+    if (expressionTimeoutRef.current) {
+      clearTimeout(expressionTimeoutRef.current);
+      expressionTimeoutRef.current = null;
+    }
+
     // ── Set animation for this segment ─────────────────────────────────────
-    // Priority: If there is text, she must use a talking animation to match the audio
-    if (item.text && !item.playSfx) {
-      if (item.emotion === 'happy') setActiveAction('talking_happy');
-      else if (item.emotion === 'sad') setActiveAction('talking_sadly');
-      else setActiveAction('talking_lips_moment');
-    } else if (item.action) {
+    if (item.action) {
       setActiveAction(item.action);
-    } else if (item.emotion === 'happy') {
-      setActiveAction('talking_happy');
-    } else if (item.emotion === 'sad') {
-      setActiveAction('talking_sadly');
+      if (item.action === 'yawning_and_sleeping') {
+        console.log('[Play] yawn/sleep action triggered. Entering sleep state.');
+        setIsAsleep(true);
+      }
     } else {
       setActiveAction('talking_lips_moment');
     }
@@ -564,7 +723,8 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
     if (!item.text) {
       console.log(`[Play] Expression-only — waiting for animation then moving on.`);
       // Wait a moment for the animation to play, then advance queue
-      setTimeout(() => {
+      expressionTimeoutRef.current = setTimeout(() => {
+        expressionTimeoutRef.current = null;
         handleSegmentEnd();
       }, 2000);
       return;
@@ -681,9 +841,15 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
     isPlayingAudioRef.current = false;
     setIsSpeaking(false);
     currentAudioRef.current = null;
+    recordSystemActivity();
 
     if (audioQueueRef.current.length > 0) {
-      checkAndPlayQueue();
+      console.log('[Cycle] Segment complete. Pausing 700ms before next...');
+      isPausingRef.current = true;
+      setTimeout(() => {
+        isPausingRef.current = false;
+        checkAndPlayQueue();
+      }, 700);
     } else {
       // ── Full cycle complete ─────────────────────────────────────────
       console.log('[Cycle] ✅ Speak done — returning to idle.');
@@ -698,6 +864,11 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
 
   // ─── Stop everything ───────────────────────────────────────────────────────
   const stopSpeechAndQueue = () => {
+    if (expressionTimeoutRef.current) {
+      clearTimeout(expressionTimeoutRef.current);
+      expressionTimeoutRef.current = null;
+    }
+    isPausingRef.current = false;
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
@@ -711,17 +882,26 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
   // ─── Reset conversation ────────────────────────────────────────────────────
   const handleReset = () => {
     stopSpeechAndQueue();
+    setIsAsleep(false);
+    setIsWakingUp(false);
     setStatus('idle');
     setActiveAction('idle');
     setMessages([{ role: 'system', content: 'Conversation reset. Ready for your input.' }]);
     console.log('[App] Conversation reset.');
+    recordUserActivity();
   };
 
   const toggleSpeaker = () => {
+    recordUserActivity();
     setSpeakerMuted(prev => {
       if (!prev) stopSpeechAndQueue();
       return !prev;
     });
+  };
+
+  const handleWakeUpComplete = () => {
+    console.log('[App] Wake up complete. Transitioning isWakingUp to false.');
+    setIsWakingUp(false);
   };
 
   // ─── Render ────────────────────────────────────────────────────────────────
@@ -733,6 +913,8 @@ Keep total response to 2-4 segments. Be warm, natural, and expressive.`;
           currentAction={activeAction}
           isSpeaking={isSpeaking}
           audioAnalyser={audioAnalyser}
+          isAsleep={isAsleep}
+          onWakeUpComplete={handleWakeUpComplete}
         />
       </div>
 

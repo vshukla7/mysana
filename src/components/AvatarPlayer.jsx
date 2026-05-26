@@ -16,27 +16,25 @@ const ACTION_FRAMES = {
   shy:                  98,
   surprised_and_smiling: 98,
   touching_her_hair:    98,
-  'touchig hair':       98,
 };
 
 // ─── FPS per action type ─────────────────────────────────────────────────────
 // Talking animations get higher FPS for smooth lip-sync
 const ACTION_FPS = {
-  idle:                 8,
+  idle:                 12,
   blink:                12,
   laugh:                12,
-  'moving hand':        10,
-  playing:              10,
-  think:                10,
-  talking_happy:        18,
-  talking_sadly:        18,
-  talking_lips_moment:  18,
+  'moving hand':        12,
+  playing:              12,
+  think:                12,
+  talking_happy:        12,
+  talking_sadly:        12,
+  talking_lips_moment:  12,
   yawning_and_sleeping: 12,
   Wink_great_with_hand: 12,
-  shy:                  10,
-  surprised_and_smiling: 10,
-  touching_her_hair:    10,
-  'touchig hair':       10,
+  shy:                  12,
+  surprised_and_smiling: 12,
+  touching_her_hair:    12,
 };
 
 // ─── Action behaviour types ───────────────────────────────────────────────────
@@ -47,7 +45,8 @@ const LOOP_ACTIONS = new Set([
 
 // IDLE_LOOP: Idle ping-pong animations
 const IDLE_ACTIONS = new Set([
-  'idle', 'blink', 'playing', 'moving hand', 'think'
+  'idle', 'blink', 'playing', 'moving hand', 'think',
+  'Wink_great_with_hand', 'surprised_and_smiling', 'touching_her_hair'
 ]);
 
 // PLAY_ONCE: Reverse back to frame 1 after completing (one-shot expressions)
@@ -61,6 +60,8 @@ export default function AvatarPlayer({
   isSpeaking = false,
   audioAnalyser = null,
   onActionComplete = null,
+  isAsleep = false,
+  onWakeUpComplete = null,
 }) {
   const canvasRef = useRef(null);
 
@@ -84,8 +85,20 @@ export default function AvatarPlayer({
   const currentActionRef = useRef(currentAction);
   useEffect(() => { currentActionRef.current = currentAction; }, [currentAction]);
 
+  const isAsleepRef = useRef(isAsleep);
+  useEffect(() => {
+    isAsleepRef.current = isAsleep;
+    if (!isAsleep && stateRef.current.action === 'yawning_and_sleeping' && stateRef.current.frameIndex === (ACTION_FRAMES['yawning_and_sleeping'] || 81)) {
+      console.log('[AvatarPlayer] ☀️ Awake triggered! Reversing sleep animation...');
+      stateRef.current.isReversing = true;
+      setIsReversing(true);
+    }
+  }, [isAsleep]);
+
   // ─── Image cache ───────────────────────────────────────────────────────────
   const imageCacheRef = useRef({});
+  const clickToggleRef = useRef('Wink_great_with_hand');
+  const isClickedGestureRef = useRef(false);
 
   // ─── 1. Pre-load frames ────────────────────────────────────────────────────
   useEffect(() => {
@@ -125,6 +138,12 @@ export default function AvatarPlayer({
   // ─── 2. React to external action changes ──────────────────────────────────
   useEffect(() => {
     const cur = stateRef.current;
+
+    // If external action requests 'idle' and we are already playing an idle variant, ignore it
+    if (currentAction === 'idle' && IDLE_ACTIONS.has(cur.action)) {
+      return;
+    }
+
     if (currentAction === cur.action && !cur.nextAction) return;
 
     console.log(`[AvatarPlayer] Action request: "${cur.action}" → "${currentAction}"`);
@@ -204,7 +223,13 @@ export default function AvatarPlayer({
     const updateFrame = () => {
       const cur = stateRef.current;
       const totalFrames = ACTION_FRAMES[cur.action] || 64;
-      const fps         = ACTION_FPS[cur.action]    || 12;
+      let fps         = ACTION_FPS[cur.action]    || 12;
+
+      // If we are actively transitioning/reversing to a queued next action, play it very fast
+      if (cur.isReversing && cur.nextAction) {
+        fps = 48; // Snappy rewind to frame 1
+      }
+
       const delay       = 1000 / fps;
 
       if (cur.isReversing) {
@@ -214,6 +239,7 @@ export default function AvatarPlayer({
           cur.frameIndex  = 1;
           cur.isReversing = false;
           setIsReversing(false);
+          const wasSleepReverse = (cur.action === 'yawning_and_sleeping');
 
           if (cur.nextAction) {
             // ── Switch to queued action
@@ -230,8 +256,8 @@ export default function AvatarPlayer({
             cur.action     = next;
             cur.nextAction = null;
             setAction(next);
-          } else if (currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action))) {
-            // ── Keep looping the active requested action
+          } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action))) {
+            // ── Keep looping the active requested action (except default idle)
             // No state change needed, it will naturally play forward
           } else {
             // ── Return to a default fallback action (play-once ended, or idle variation switch)
@@ -246,6 +272,11 @@ export default function AvatarPlayer({
             cur.action = nextAct;
             setAction(nextAct);
           }
+
+          if (wasSleepReverse && onWakeUpComplete) {
+            console.log('[AvatarPlayer] onWakeUpComplete triggered!');
+            onWakeUpComplete();
+          }
         } else {
           cur.frameIndex = prevFrame;
         }
@@ -253,13 +284,18 @@ export default function AvatarPlayer({
       } else {
         // ── Forward play
         const nextFrame = cur.frameIndex + 1;
+        const maxFrames = (isClickedGestureRef.current && cur.action === 'surprised_and_smiling') ? 50 : totalFrames;
 
-        if (nextFrame > totalFrames) {
-          if (cur.nextAction) {
+        if (nextFrame > maxFrames) {
+          if (cur.action === 'yawning_and_sleeping' && isAsleepRef.current) {
+            // Freeze at the last frame
+            cur.frameIndex = totalFrames;
+          } else if (cur.nextAction) {
             // Queued action waiting — start reversing
             cur.isReversing = true;
-            cur.frameIndex  = totalFrames - 1;
+            cur.frameIndex  = maxFrames - 1;
             setIsReversing(true);
+            isClickedGestureRef.current = false;
 
           } else if (LOOP_ACTIONS.has(cur.action)) {
             // ── Loop: restart from frame 1 (for talking animations)
@@ -268,14 +304,16 @@ export default function AvatarPlayer({
           } else if (IDLE_ACTIONS.has(cur.action)) {
             // ── Idle ping-pong: reverse direction
             cur.isReversing = true;
-            cur.frameIndex  = totalFrames - 1;
+            cur.frameIndex  = maxFrames - 1;
             setIsReversing(true);
+            isClickedGestureRef.current = false;
 
           } else {
             // ── Play-once action complete: reverse back to idle
             cur.isReversing = true;
-            cur.frameIndex  = totalFrames - 1;
+            cur.frameIndex  = maxFrames - 1;
             setIsReversing(true);
+            isClickedGestureRef.current = false;
             if (onActionComplete) onActionComplete(cur.action);
           }
         } else {
@@ -290,15 +328,22 @@ export default function AvatarPlayer({
 
     timer = setTimeout(updateFrame, 1000 / (ACTION_FPS['idle'] || 12));
     return () => clearTimeout(timer);
-  }, [onActionComplete]);
+  }, [onActionComplete, onWakeUpComplete]);
 
   // ─── 5. Idle variation picker ──────────────────────────────────────────────
   const pickIdleVariant = () => {
     const rand = Math.random();
-    if (rand > 0.88) return 'playing';
-    if (rand > 0.75) return 'moving hand';
-    if (rand > 0.55) return 'blink';
-    return 'idle';
+    // 70% chance to remain in default resting idle pose
+    if (rand < 0.70) return 'idle';
+
+    // 30% chance to play a random active gesture (think excluded)
+    const actionRand = Math.random();
+    if (actionRand > 0.82) return 'blink';
+    if (actionRand > 0.65) return 'moving hand';
+    if (actionRand > 0.48) return 'playing';
+    if (actionRand > 0.31) return 'touching_her_hair';
+    if (actionRand > 0.15) return 'Wink_great_with_hand';
+    return 'surprised_and_smiling';
   };
 
   // ─── 6. Manual trigger (debug overlay) ────────────────────────────────────
@@ -330,16 +375,41 @@ export default function AvatarPlayer({
     }
   };
 
+  // ─── 7. Body Click Gesture ────────────────────────────────────────────────
+  const triggerClickGesture = () => {
+    const act = clickToggleRef.current;
+    console.log(`[AvatarPlayer] 🎯 Body click gesture triggered: "${act}"`);
+
+    // Toggle the action for the next click
+    clickToggleRef.current = act === 'Wink_great_with_hand' ? 'surprised_and_smiling' : 'Wink_great_with_hand';
+
+    const cur = stateRef.current;
+    isClickedGestureRef.current = true;
+
+    // Transition to the clicked action
+    if (cur.action !== act) {
+      cur.nextAction  = act;
+      cur.isReversing = true;
+      setIsReversing(true);
+    } else {
+      cur.frameIndex = 1;
+      cur.isReversing = false;
+      setIsReversing(false);
+    }
+  };
+
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <canvas
         ref={canvasRef}
+        onClick={triggerClickGesture}
         style={{
           position: 'absolute', top: 0, left: 0,
           width: '100%', height: '100%',
           objectFit: 'cover', objectPosition: 'center',
           display: 'block',
+          cursor: 'pointer',
         }}
       />
 
@@ -376,6 +446,39 @@ export default function AvatarPlayer({
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Apple style name tag overlay */}
+      <div style={{
+        position: 'absolute',
+        bottom: '0',
+        right: '0',
+        background: '#ffffff',
+        borderLeft: '1px solid rgba(0, 0, 0, 0.1)',
+        borderTop: '1px solid rgba(0, 0, 0, 0.1)',
+        borderTopLeftRadius: '40px',
+        padding: '15px 35px',
+        color: '#000000',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+        fontSize: '32px',
+        fontWeight: 'bold',
+        letterSpacing: '0.5px',
+        boxShadow: '0 -5px 25px rgba(0, 0, 0, 0.15)',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        zIndex: 10,
+        display: 'flex',
+        alignItems: 'center',
+        gap: '15px',
+      }}>
+        <span style={{
+          width: '15px',
+          height: '15px',
+          backgroundColor: '#30d158',
+          borderRadius: '50%',
+          boxShadow: '0 0 10px #30d158',
+        }} />
+        Sara
       </div>
     </div>
   );

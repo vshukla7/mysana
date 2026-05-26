@@ -30,6 +30,12 @@ const VALID_ACTIONS = {
   'touching her hair':      'touching_her_hair',
   'touchig hair':           'touching_her_hair',
   'touchig_hair':           'touching_her_hair',
+  'talking_happy':          'talking_happy',
+  'talking happy':          'talking_happy',
+  'talking_sadly':          'talking_sadly',
+  'talking sadly':          'talking_sadly',
+  'talking_lips_moment':    'talking_lips_moment',
+  'talking lips moment':    'talking_lips_moment',
 };
 
 /** Actions that have SFX audio files in /public/sfx/ */
@@ -38,14 +44,13 @@ const SFX_ACTIONS = new Set(['laugh', 'yawning_and_sleeping']);
 /**
  * Parse a single LLM response line into a structured segment.
  * @param {string} rawLine - One line of LLM output
- * @returns {{ text: string, action: string|null, emotion: string, playSfx: boolean } | null}
+ * @returns {{ text: string, action: string|null, playSfx: boolean } | null}
  */
 export const parseSegment = (rawLine) => {
   if (!rawLine || !rawLine.trim()) return null;
 
   let remaining = rawLine.trim();
   let action = null;
-  let emotion = 'normal';
   let playSfx = false;
 
   // Extract [action:NAME]
@@ -57,13 +62,8 @@ export const parseSegment = (rawLine) => {
     console.log(`[Parser] Found action tag: "${actionMatch[1]}" → mapped to: "${action}"`);
   }
 
-  // Extract [emotion:NAME]
-  const emotionMatch = remaining.match(/\[emotion:([^\]]+)\]/i);
-  if (emotionMatch) {
-    emotion = emotionMatch[1].trim().toLowerCase();
-    remaining = remaining.replace(emotionMatch[0], '');
-    console.log(`[Parser] Found emotion tag: "${emotion}"`);
-  }
+  // Strip any accidental [emotion:NAME] tags
+  remaining = remaining.replace(/\[emotion:[^\]]+\]/gi, '');
 
   // Check for [sfx] — only valid when action supports it
   if (/\[sfx\]/i.test(remaining)) {
@@ -95,7 +95,7 @@ export const parseSegment = (rawLine) => {
     return null;
   }
 
-  const segment = { text, action, emotion, playSfx };
+  const segment = { text, action, playSfx };
   console.log(`[Parser] ✅ Segment:`, segment);
   return segment;
 };

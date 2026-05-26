@@ -1,7 +1,7 @@
 {
   "name": "temp-vite",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^2.6.0",
     "groq-sdk": "^1.2.0",
     "lucide-react": "^1.16.0",
     "react": "^19.2.6",
