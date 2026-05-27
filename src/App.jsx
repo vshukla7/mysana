@@ -3,6 +3,15 @@ import { Groq } from 'groq-sdk';
 import { Mic, MicOff, Volume2, VolumeX, PhoneOff } from 'lucide-react';
 import AvatarPlayer from './components/AvatarPlayer';
 import { parseSegment } from './utils/responseParser';
+import AvatarStateManager from './utils/avatarStateManager';
+import { 
+  getSanaSystemPrompt, 
+  getEmotionalSystemPrompt, 
+  detectUserEmotion, 
+  isGreeting,
+  validateSegments 
+} from './utils/llmPrompts';
+import AudioSyncManager from './utils/audioSyncManager';
 
 export default function App() {
   // ─── API keys ──────────────────────────────────────────────────────────────
@@ -27,6 +36,7 @@ export default function App() {
   const [isSpeaking,   setIsSpeaking]   = useState(false);
   const [audioAnalyser, setAudioAnalyser] = useState(null);
   const [speakerMuted, setSpeakerMuted]   = useState(false);
+  const [audioDuration, setAudioDuration] = useState(0); // Duration in seconds for animation sync
 
   // ─── Mic state ─────────────────────────────────────────────────────────────
   const [isContinuousMic, setIsContinuousMic] = useState(false);
@@ -60,6 +70,12 @@ export default function App() {
 
   // ─── Busy lock — prevents mic restart while AI is active ─────────────────
   const isBusyRef = useRef(false); // true while thinking or speaking
+
+  // ─── Avatar state manager ───────────────────────────────────────────────
+  const avatarStateRef = useRef(new AvatarStateManager());
+  
+  // ─── Audio sync manager ─────────────────────────────────────────────────
+  const audioSyncRef = useRef(null);
 
   // ─── Start the first recording when continuous mic is toggled ON ────────────
   // (Subsequent cycles are driven by handleSegmentEnd, not by this effect)
@@ -251,8 +267,10 @@ export default function App() {
         if (loud) {
           recordUserActivity();
           if (isAsleepRef.current) {
-            console.log('[VAD] Speech detected while asleep. Waking up...');
+            console.log('[VAD] 🎤 Speech detected while asleep. Waking up...');
             wakeUpAvatar();
+            // Clear any queued responses and stop current playback
+            stopSpeechAndQueue();
           }
           if (!hasSpoken) {
             hasSpoken = true;
@@ -428,64 +446,9 @@ export default function App() {
     try {
       const groq = new Groq({ apiKey: groqKey, dangerouslyAllowBrowser: true });
 
-      const systemPrompt = `You are Sana, a warm, expressive, female AI avatar who communicates both verbally and physically.
-
-CONVERSATION STYLE & TONE (CRITICAL):
-- Talk simple, emotional, warm, and natural.
-- Always address the user respectfully as 'Sir' (सर in Hindi, e.g. "आपका आज का दिन कैसा रहा सर?").
-- Keep your responses very short, concise, and focused on making an emotional connection.
-- Avoid asking multiple questions in a single response. Ask at most one simple question, or just make a warm statement.
-- Keep total response to ONLY 1-2 segments (never exceed 3 segments).
-
-CRITICAL RULE ON TEXT & ACTIONS:
-- ONLY the three talking actions ('talking_happy', 'talking_sadly', 'talking_lips_moment') are allowed to have spoken text/speech.
-- Any other action (e.g. 'touching_her_hair', 'Wink_great_with_hand', 'shy', 'surprised_and_smiling', 'think', 'moving hand', 'playing', 'blink', 'laugh', 'yawning_and_sleeping') must be written as a direct, textless physical gesture (expression-only, e.g. '[action:touching_her_hair]' with NO text).
-- If you want to do a physical action AND talk, you MUST split it into two segments:
-  Segment 1: The physical action (with no text), e.g., [action:touching_her_hair]
-  Segment 2: A talking action (with text), e.g., [action:talking_happy] today I styled my hair!
-
-RESPONSE FORMAT — MANDATORY:
-- Every response is made of 1-3 line-separated SEGMENTS
-- Each segment must start with: [action:ACTION_NAME]
-- Add [sfx] only for laugh or yawning_and_sleeping actions to play real sound effects
-
-AVAILABLE TALKING ACTIONS (Speech allowed):
-- talking_happy: Talking with a happy/joyful expression.
-- talking_sadly: Talking with a sad/gloom expression.
-- talking_lips_moment: General talking expression.
-
-AVAILABLE PHYSICAL ACTIONS (NO text allowed, must be empty text segments):
-- Wink_great_with_hand: Winking, greeting, or waving hand.
-- touching_her_hair: Running hand through her hair, styling hair.
-- shy: Looking shy, acting cute, blushing.
-- surprised_and_smiling: Eyes widening with happy surprise, then transitioning to a warm smile.
-- think: Contemplative, looking up/away.
-- moving hand: Gesticulating with hands to explain something.
-- playing: Fidgeting, playing with hands.
-- blink: A simple quick blink.
-- laugh: Giggling or laughing. (Supports [sfx]).
-- yawning_and_sleeping: Yawning and showing sleepiness. (Supports [sfx]).
-
-GREETING RULE (IMPORTANT):
-- If the user greets you, start your response with a textless greet segment, followed by a talking segment:
-  [action:Wink_great_with_hand]
-  [action:talking_happy] Hello! Nice to meet you!
-
-LAUGH RULES (IMPORTANT):
-- "[action:laugh][sfx]" (no text) → ONLY the SFX plays, no speech at all
-
-FULL EXAMPLES:
-[action:Wink_great_with_hand]
-[action:talking_happy] Oh hi there! I'm so glad to talk to you.
-
-[action:touching_her_hair]
-[action:talking_happy] Do you like how I styled my hair today?
-
-[action:think]
-[action:talking_lips_moment] Hmm, let me think about that...
-
-In gender-conjugating languages like Hindi, always use feminine conjugations.
-Be natural, diverse in your physical animations, and very expressive. Keep total response to 1-3 segments.`;
+      // Detect user emotion for contextual prompting
+      const userEmotion = isProactive ? 'neutral' : detectUserEmotion(text || textInput);
+      const systemPrompt = getEmotionalSystemPrompt(userEmotion);
 
       const responseStream = await groq.chat.completions.create({
         model:  groqModel,
@@ -570,18 +533,11 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
     if (!parsed) return;
 
     let { text, action, playSfx } = parsed;
-
-    // Detect greeting (hi, hello, etc.) to automatically greet with hand
-    const hasGreeting = text && /\b(hi|hello|hey|greetings|welcome|namaste|नमस्ते|हेलो)\b/i.test(text);
-    if (hasGreeting && action !== 'Wink_great_with_hand') {
-      console.log(`[Parser] Auto-detect greeting in text: "${text}". Setting action to Wink_great_with_hand.`);
-      action = 'Wink_great_with_hand';
-    }
-
     const isTalkingAction = action === 'talking_happy' || action === 'talking_sadly' || action === 'talking_lips_moment';
 
+    // ─── Rule 1: Physical action + Text = Split into 2 segments ───────────
     if (text && action && !isTalkingAction) {
-      // Split into physical expression first, talking second
+      // Create physical expression segment first
       const exprItem = {
         id:       Date.now() + Math.random(),
         text:     '',
@@ -592,21 +548,55 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
         isLoaded: true,
       };
 
+      // Create talking segment after
       const talkItem = {
         id:       Date.now() + Math.random() + 0.1,
         text,
-        action:   null,
+        action:   'talking_happy', // Default to happy talking if no talking action specified
         playSfx:  false,
         sfxUrl:   null,
         audioUrl: null,
         isLoaded: false,
       };
 
-      console.log(`[Queue] Splitting segment: physical action first:`, exprItem, `then talking:`, talkItem);
+      console.log(`[Queue] Splitting: physical action first → then talking`);
       audioQueueRef.current.push(exprItem);
       audioQueueRef.current.push(talkItem);
       generateVoiceover(talkItem);
       checkAndPlayQueue();
+
+    // ─── Rule 2: Greeting detection (auto-add wave before greeting talk) ────
+    } else if (text && isTalkingAction && isGreeting(text)) {
+      console.log(`[Segment] Detected greeting. Adding wave animation before talk.`);
+      
+      // Add wave gesture first
+      const waveItem = {
+        id:       Date.now() + Math.random(),
+        text:     '',
+        action:   'Wink_great_with_hand',
+        playSfx:  false,
+        sfxUrl:   null,
+        audioUrl: null,
+        isLoaded: true,
+      };
+
+      // Then add the talking segment
+      const talkItem = {
+        id:       Date.now() + Math.random() + 0.1,
+        text,
+        action,
+        playSfx:  false,
+        sfxUrl:   null,
+        audioUrl: null,
+        isLoaded: false,
+      };
+
+      audioQueueRef.current.push(waveItem);
+      audioQueueRef.current.push(talkItem);
+      generateVoiceover(talkItem);
+      checkAndPlayQueue();
+
+    // ─── Rule 3: Standard segment ────────────────────────────────────────
     } else {
       const queueItem = {
         id:       Date.now() + Math.random(),
@@ -715,8 +705,12 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
         console.log('[Play] yawn/sleep action triggered. Entering sleep state.');
         setIsAsleep(true);
       }
-    } else {
+    } else if (item.text) {
+      // Default to talking_lips_moment for text without explicit action
       setActiveAction('talking_lips_moment');
+    } else {
+      // No action and no text → shouldn't happen, but fallback to idle
+      setActiveAction('idle');
     }
 
     // ── Expression-only: no audio to play ──────────────────────────────────
@@ -788,6 +782,20 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
       } catch (_) { /* already connected */ }
     }
 
+    // Initialize audio sync manager if needed
+    if (!audioSyncRef.current && analyserRef.current) {
+      audioSyncRef.current = new AudioSyncManager(audioCtxRef.current, analyserRef.current);
+    }
+
+    // Wait for audio metadata to load, then set duration for animation sync
+    audio.addEventListener('loadedmetadata', () => {
+      const duration = audio.duration || 0;
+      if (duration > 0) {
+        setAudioDuration(duration);
+        console.log(`[Audio] Duration: ${duration.toFixed(2)}s — Animation sync enabled`);
+      }
+    }, { once: true });
+
     audio.play().catch(e => {
       console.error('[Audio] Playback failed, using browser TTS:', e);
       playBrowserTTS(item.text);
@@ -795,10 +803,12 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
 
     audio.onended = () => {
       console.log('[Audio] ✅ Playback finished.');
+      setAudioDuration(0); // Reset duration
       handleSegmentEnd();
     };
     audio.onerror = () => {
       console.warn('[Audio] Error — fallback to browser TTS.');
+      setAudioDuration(0);
       playBrowserTTS(item.text);
     };
   };
@@ -808,6 +818,12 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
     // Strip TTS voice expression tags before reading aloud
     const cleanText = text.replace(/\[[a-zA-Z\s]+\]/g, '').replace(/\s+/g, ' ').trim();
     console.log(`[BrowserTTS] Fallback: "${cleanText}"`);
+
+    // Estimate audio duration for animation sync: ~150 words per minute = 0.4 seconds per word
+    const wordCount = cleanText.split(/\s+/).length;
+    const estimatedDuration = Math.max(1, wordCount * 0.4);
+    setAudioDuration(estimatedDuration);
+    console.log(`[BrowserTTS] Estimated duration: ${estimatedDuration.toFixed(2)}s (${wordCount} words)`);
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
     const hasHindi  = /[\u0900-\u097F]/.test(text);
@@ -831,8 +847,16 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
     else        { utterance.lang = hasHindi ? 'hi-IN' : 'en-US'; }
 
     console.log(`[BrowserTTS] Voice: ${voice?.name ?? 'default'}`);
-    utterance.onend  = () => { console.log('[BrowserTTS] Done.'); handleSegmentEnd(); };
-    utterance.onerror = (e) => { console.error('[BrowserTTS] Error:', e); handleSegmentEnd(); };
+    utterance.onend  = () => { 
+      console.log('[BrowserTTS] Done.'); 
+      setAudioDuration(0);
+      handleSegmentEnd(); 
+    };
+    utterance.onerror = (e) => { 
+      console.error('[BrowserTTS] Error:', e); 
+      setAudioDuration(0);
+      handleSegmentEnd(); 
+    };
     window.speechSynthesis.speak(utterance);
   };
 
@@ -915,6 +939,7 @@ Be natural, diverse in your physical animations, and very expressive. Keep total
           audioAnalyser={audioAnalyser}
           isAsleep={isAsleep}
           onWakeUpComplete={handleWakeUpComplete}
+          audioDuration={audioDuration}
         />
       </div>
 

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { calculateAudioSyncTiming, getFrameDelay } from '../utils/animationAudioSync';
 
 // ─── Frame counts per action ────────────────────────────────────────────────
 const ACTION_FRAMES = {
@@ -10,7 +11,7 @@ const ACTION_FRAMES = {
   think:                73,
   talking_happy:        98,
   talking_sadly:        42,
-  talking_lips_moment:  98,
+  talking_lips_moment:  55,
   yawning_and_sleeping: 81,
   Wink_great_with_hand: 98,
   shy:                  98,
@@ -62,6 +63,7 @@ export default function AvatarPlayer({
   onActionComplete = null,
   isAsleep = false,
   onWakeUpComplete = null,
+  audioDuration = 0, // NEW: Audio duration in seconds for sync timing
 }) {
   const canvasRef = useRef(null);
 
@@ -76,11 +78,28 @@ export default function AvatarPlayer({
     frameIndex:  1,
     isReversing: false,
     nextAction:  null,
+    // Audio sync state
+    audioStartTime: null,
+    audioSyncTiming: null,
   });
 
   // Sync isSpeaking into a ref so the loop can read the current value
   const isSpeakingRef = useRef(isSpeaking);
   useEffect(() => { isSpeakingRef.current = isSpeaking; }, [isSpeaking]);
+
+  // Track audio duration for animation sync
+  const audioDurationRef = useRef(audioDuration);
+  useEffect(() => { 
+    audioDurationRef.current = audioDuration;
+    // When audio duration changes (new audio starting), calculate sync timing
+    if (audioDuration > 0 && isSpeakingRef.current) {
+      const totalFrames = ACTION_FRAMES[stateRef.current.action] || 98;
+      const timing = calculateAudioSyncTiming(audioDuration, totalFrames);
+      stateRef.current.audioSyncTiming = timing;
+      stateRef.current.audioStartTime = Date.now();
+      console.log(`[AvatarPlayer] Audio sync enabled: ${audioDuration.toFixed(2)}s audio → ${timing.forwardFps.toFixed(1)} FPS forward`, timing.debugInfo);
+    }
+  }, [audioDuration]);
 
   const currentActionRef = useRef(currentAction);
   useEffect(() => { currentActionRef.current = currentAction; }, [currentAction]);
@@ -224,14 +243,55 @@ export default function AvatarPlayer({
       const cur = stateRef.current;
       const totalFrames = ACTION_FRAMES[cur.action] || 64;
       let fps         = ACTION_FPS[cur.action]    || 12;
+      let delay       = 1000 / fps;
 
-      // If we are actively transitioning/reversing to a queued next action, play it very fast
-      if (cur.isReversing && cur.nextAction) {
-        fps = 48; // Snappy rewind to frame 1
+      // ── AUDIO-SYNCED TIMING for talking animations ──────────────────────
+      const isTalkingAction = cur.action === 'talking_happy' || 
+                             cur.action === 'talking_sadly' || 
+                             cur.action === 'talking_lips_moment';
+      
+      if (isTalkingAction && cur.audioSyncTiming && cur.audioStartTime && isSpeakingRef.current) {
+        const elapsedMs = Date.now() - cur.audioStartTime;
+        const elapsedSeconds = elapsedMs / 1000;
+        const halfDuration = cur.audioSyncTiming.totalDuration / 2;
+
+        // ── Determine phase: forward or reverse ──────────────────────────
+        const isForwardPhase = elapsedSeconds < halfDuration;
+
+        if (isForwardPhase) {
+          // ── FORWARD PHASE: Play frames 1→totalFrames during first half ──
+          fps = cur.audioSyncTiming.forwardFps;
+          delay = getFrameDelay(fps);
+
+          // Calculate which frame should be playing at this time
+          const frameProgress = elapsedSeconds / halfDuration; // 0 to 1
+          const targetFrame = Math.ceil(frameProgress * totalFrames);
+          cur.frameIndex = Math.max(1, Math.min(targetFrame, totalFrames));
+          cur.isReversing = false;
+
+        } else {
+          // ── REVERSE PHASE: Play frames totalFrames→1 during second half ──
+          if (!cur.isReversing) {
+            cur.isReversing = true;
+            setIsReversing(true);
+          }
+
+          fps = cur.audioSyncTiming.reverseFps;
+          delay = getFrameDelay(fps);
+
+          // Calculate which frame should be playing in reverse
+          const timeIntoReverse = elapsedSeconds - halfDuration;
+          const reverseProgress = timeIntoReverse / halfDuration; // 0 to 1
+          const targetFrame = totalFrames - Math.floor(reverseProgress * (totalFrames - 1));
+          cur.frameIndex = Math.max(1, Math.min(targetFrame, totalFrames));
+        }
+      } else if (cur.isReversing && cur.nextAction) {
+        // ── Fast reverse when transitioning to next action ─────────────────
+        fps = 48;
+        delay = getFrameDelay(fps);
       }
 
-      const delay       = 1000 / fps;
-
+      // ── Original animation loop logic ────────────────────────────────────
       if (cur.isReversing) {
         // ── Reversing back to frame 1
         const prevFrame = cur.frameIndex - 1;
@@ -255,6 +315,8 @@ export default function AvatarPlayer({
 
             cur.action     = next;
             cur.nextAction = null;
+            cur.audioSyncTiming = null; // Reset audio sync for new action
+            cur.audioStartTime = null;
             setAction(next);
           } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action))) {
             // ── Keep looping the active requested action (except default idle)
@@ -270,6 +332,8 @@ export default function AvatarPlayer({
               nextAct = pickIdleVariant();
             }
             cur.action = nextAct;
+            cur.audioSyncTiming = null;
+            cur.audioStartTime = null;
             setAction(nextAct);
           }
 
@@ -282,42 +346,44 @@ export default function AvatarPlayer({
         }
 
       } else {
-        // ── Forward play
-        const nextFrame = cur.frameIndex + 1;
-        const maxFrames = (isClickedGestureRef.current && cur.action === 'surprised_and_smiling') ? 50 : totalFrames;
+        // ── Forward play (only if NOT audio-synced)
+        if (!isTalkingAction || !cur.audioSyncTiming || !isSpeakingRef.current) {
+          const nextFrame = cur.frameIndex + 1;
+          const maxFrames = (isClickedGestureRef.current && cur.action === 'surprised_and_smiling') ? 50 : totalFrames;
 
-        if (nextFrame > maxFrames) {
-          if (cur.action === 'yawning_and_sleeping' && isAsleepRef.current) {
-            // Freeze at the last frame
-            cur.frameIndex = totalFrames;
-          } else if (cur.nextAction) {
-            // Queued action waiting — start reversing
-            cur.isReversing = true;
-            cur.frameIndex  = maxFrames - 1;
-            setIsReversing(true);
-            isClickedGestureRef.current = false;
+          if (nextFrame > maxFrames) {
+            if (cur.action === 'yawning_and_sleeping' && isAsleepRef.current) {
+              // Freeze at the last frame
+              cur.frameIndex = totalFrames;
+            } else if (cur.nextAction) {
+              // Queued action waiting — start reversing
+              cur.isReversing = true;
+              cur.frameIndex  = maxFrames - 1;
+              setIsReversing(true);
+              isClickedGestureRef.current = false;
 
-          } else if (LOOP_ACTIONS.has(cur.action)) {
-            // ── Loop: restart from frame 1 (for talking animations)
-            cur.frameIndex = 1;
+            } else if (LOOP_ACTIONS.has(cur.action)) {
+              // ── Loop: restart from frame 1 (for talking animations)
+              cur.frameIndex = 1;
 
-          } else if (IDLE_ACTIONS.has(cur.action)) {
-            // ── Idle ping-pong: reverse direction
-            cur.isReversing = true;
-            cur.frameIndex  = maxFrames - 1;
-            setIsReversing(true);
-            isClickedGestureRef.current = false;
+            } else if (IDLE_ACTIONS.has(cur.action)) {
+              // ── Idle ping-pong: reverse direction
+              cur.isReversing = true;
+              cur.frameIndex  = maxFrames - 1;
+              setIsReversing(true);
+              isClickedGestureRef.current = false;
 
+            } else {
+              // ── Play-once action complete: reverse back to idle
+              cur.isReversing = true;
+              cur.frameIndex  = maxFrames - 1;
+              setIsReversing(true);
+              isClickedGestureRef.current = false;
+              if (onActionComplete) onActionComplete(cur.action);
+            }
           } else {
-            // ── Play-once action complete: reverse back to idle
-            cur.isReversing = true;
-            cur.frameIndex  = maxFrames - 1;
-            setIsReversing(true);
-            isClickedGestureRef.current = false;
-            if (onActionComplete) onActionComplete(cur.action);
+            cur.frameIndex = nextFrame;
           }
-        } else {
-          cur.frameIndex = nextFrame;
         }
       }
 
