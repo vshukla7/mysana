@@ -1,9 +1,6 @@
 # actions should be updated 
 - playing
-- moving hand
 - idel
-- blink 
-- come from bottom screen
 - kiss on screen
 - flying kiss
 

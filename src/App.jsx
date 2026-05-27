@@ -573,7 +573,7 @@ export default function App() {
       const waveItem = {
         id:       Date.now() + Math.random(),
         text:     '',
-        action:   'Wink_great_with_hand',
+        action:   'wink_great_with_hand',
         playSfx:  false,
         sfxUrl:   null,
         audioUrl: null,

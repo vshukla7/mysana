@@ -3,51 +3,57 @@ import { calculateAudioSyncTiming, getFrameDelay } from '../utils/animationAudio
 
 // ─── Frame counts per action ────────────────────────────────────────────────
 const ACTION_FRAMES = {
-  idle:                 64,
-  blink:                64,
+  idle:                 98,
   laugh:                74,
-  'moving hand':        64,
-  playing:              64,
-  think:                73,
+  playing:              98,
+  think:                74,
   talking_happy:        98,
-  talking_sadly:        42,
+  talking_sadly:        41,
   talking_lips_moment:  55,
   yawning_and_sleeping: 81,
-  Wink_great_with_hand: 98,
+  wink_great_with_hand: 98,
   shy:                  98,
   surprised_and_smiling: 98,
   touching_her_hair:    98,
+  flying_kiss:          98,
+  kiss_on_screen:       98,
 };
 
 // ─── FPS per action type ─────────────────────────────────────────────────────
 // Talking animations get higher FPS for smooth lip-sync
 const ACTION_FPS = {
   idle:                 12,
-  blink:                12,
   laugh:                12,
-  'moving hand':        12,
   playing:              12,
   think:                12,
   talking_happy:        12,
   talking_sadly:        12,
   talking_lips_moment:  12,
   yawning_and_sleeping: 12,
-  Wink_great_with_hand: 12,
+  wink_great_with_hand: 12,
   shy:                  12,
   surprised_and_smiling: 12,
   touching_her_hair:    12,
+  flying_kiss:          12,
+  kiss_on_screen:       12,
 };
 
 // ─── Action behaviour types ───────────────────────────────────────────────────
-// LOOP: Restart from frame 1 when done (used for talking & idle)
+// LOOP: Restart from frame 1 when done (used for talking & continuous animations)
 const LOOP_ACTIONS = new Set([
   'talking_happy', 'talking_sadly', 'talking_lips_moment',
+  'flying_kiss', 'kiss_on_screen',
+]);
+
+// LOOP_ONLY: Play forward and loop without reversing (first frame = last frame)
+const LOOP_ONLY_ACTIONS = new Set([
+  'playing',
 ]);
 
 // IDLE_LOOP: Idle ping-pong animations
 const IDLE_ACTIONS = new Set([
-  'idle', 'blink', 'playing', 'moving hand', 'think',
-  'Wink_great_with_hand', 'surprised_and_smiling', 'touching_her_hair'
+  'idle', 'blink', 'moving hand', 'think',
+  'wink_great_with_hand', 'surprised_and_smiling', 'touching_her_hair'
 ]);
 
 // PLAY_ONCE: Reverse back to frame 1 after completing (one-shot expressions)
@@ -116,8 +122,15 @@ export default function AvatarPlayer({
 
   // ─── Image cache ───────────────────────────────────────────────────────────
   const imageCacheRef = useRef({});
-  const clickToggleRef = useRef('Wink_great_with_hand');
+  const cacheVersionRef = useRef(Date.now()); // Cache-busting parameter
+  const clickToggleRef = useRef('wink_great_with_hand');
   const isClickedGestureRef = useRef(false);
+
+  // ─── Force clear cache on component mount (hard reset) ────────────────────
+  useEffect(() => {
+    imageCacheRef.current = {}; // Clear all cached images
+    cacheVersionRef.current = Date.now(); // Update cache-bust version
+  }, []);
 
   // ─── 1. Pre-load frames ────────────────────────────────────────────────────
   useEffect(() => {
@@ -139,7 +152,7 @@ export default function AvatarPlayer({
         const key = `${act}_${i}`;
         if (!imageCacheRef.current[key]) {
           const img = new Image();
-          img.src = `/avatar/${act}/${act}_${i}.jpg`;
+          img.src = `/avatar/${act}/${act}_${i}.jpg?v=${cacheVersionRef.current}`;
           img.onload = () => {
             imageCacheRef.current[key] = img;
             if (act === stateRef.current.action && i === stateRef.current.frameIndex) {
@@ -169,7 +182,7 @@ export default function AvatarPlayer({
 
     // Only allow instant cuts between actions that share the exact same base body pose (talking/idle)
     // This ensures that when audio stops, talking instantly stops, but physical reactions smoothly reverse.
-    const isBasePose = (act) => LOOP_ACTIONS.has(act) || act === 'idle' || act === 'blink';
+    const isBasePose = (act) => LOOP_ACTIONS.has(act) || LOOP_ONLY_ACTIONS.has(act) || act === 'idle' || act === 'blink';
     const isInstantCut = isBasePose(cur.action) && isBasePose(currentAction);
 
     if (isInstantCut) {
@@ -318,7 +331,7 @@ export default function AvatarPlayer({
             cur.audioSyncTiming = null; // Reset audio sync for new action
             cur.audioStartTime = null;
             setAction(next);
-          } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action))) {
+            } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action) || LOOP_ONLY_ACTIONS.has(cur.action))) {
             // ── Keep looping the active requested action (except default idle)
             // No state change needed, it will naturally play forward
           } else {
@@ -362,8 +375,8 @@ export default function AvatarPlayer({
               setIsReversing(true);
               isClickedGestureRef.current = false;
 
-            } else if (LOOP_ACTIONS.has(cur.action)) {
-              // ── Loop: restart from frame 1 (for talking animations)
+            } else if (LOOP_ACTIONS.has(cur.action) || LOOP_ONLY_ACTIONS.has(cur.action)) {
+              // ── Loop: restart from frame 1 (for talking animations & looping actions)
               cur.frameIndex = 1;
 
             } else if (IDLE_ACTIONS.has(cur.action)) {
@@ -408,7 +421,7 @@ export default function AvatarPlayer({
     if (actionRand > 0.65) return 'moving hand';
     if (actionRand > 0.48) return 'playing';
     if (actionRand > 0.31) return 'touching_her_hair';
-    if (actionRand > 0.15) return 'Wink_great_with_hand';
+    if (actionRand > 0.15) return 'wink_great_with_hand';
     return 'surprised_and_smiling';
   };
 
@@ -426,7 +439,7 @@ export default function AvatarPlayer({
 
     if (cur.action !== act) {
       // Instant cut for loop actions, smooth for others
-      if (LOOP_ACTIONS.has(act) || IDLE_ACTIONS.has(cur.action)) {
+      if (LOOP_ACTIONS.has(act) || LOOP_ONLY_ACTIONS.has(act) || IDLE_ACTIONS.has(cur.action)) {
         cur.isReversing = false;
         cur.nextAction  = null;
         cur.frameIndex  = 1;
@@ -447,7 +460,7 @@ export default function AvatarPlayer({
     console.log(`[AvatarPlayer] 🎯 Body click gesture triggered: "${act}"`);
 
     // Toggle the action for the next click
-    clickToggleRef.current = act === 'Wink_great_with_hand' ? 'surprised_and_smiling' : 'Wink_great_with_hand';
+    clickToggleRef.current = act === 'wink_great_with_hand' ? 'surprised_and_smiling' : 'wink_great_with_hand';
 
     const cur = stateRef.current;
     isClickedGestureRef.current = true;

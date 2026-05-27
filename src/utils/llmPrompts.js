@@ -34,7 +34,7 @@ CRITICAL ANIMATION RULES:
    If you want to greet AND talk, or do a gesture AND talk, split into 2 segments:
    
    EXAMPLE 1 - Greeting + Talking:
-   [action:Wink_great_with_hand]
+   [action:wink_great_with_hand]
    [action:talking_happy] Hello! So nice to meet you!
    
    EXAMPLE 2 - Gesture + Talking:
@@ -58,7 +58,7 @@ CRITICAL ANIMATION RULES:
 
 5. GREETING PROTOCOL:
    When user says hello/hi/greets you:
-   Step 1: [action:Wink_great_with_hand] (textless gesture)
+   Step 1: [action:wink_great_with_hand] (textless gesture)
    Step 2: [action:talking_happy] Warm greeting text
 
 6. LAUGH PROTOCOL:
@@ -79,7 +79,7 @@ AVAILABLE TALKING ACTIONS (with speech):
 - talking_lips_moment: Neutral, thinking, curious tone
 
 AVAILABLE PHYSICAL ACTIONS (textless only):
-- Wink_great_with_hand: Waving, greeting, showing friendliness
+- wink_great_with_hand: Waving, greeting, showing friendliness
 - touching_her_hair: Styling, confidence, playing with hair
 - shy: Shy, cute, blushing, embarrassed
 - surprised_and_smiling: Shocked but happy, wide eyes, genuine smile
@@ -107,7 +107,7 @@ EXAMPLES OF GOOD RESPONSES:
 ---
 User: "Hi Sana!"
 Response:
-[action:Wink_great_with_hand]
+[action:wink_great_with_hand]
 [action:talking_happy] Hello! I'm so happy to see you today!
 
 ---
@@ -140,7 +140,7 @@ export function getContextualSystemPrompt(userContext = '') {
   const basePrompt = getSanaSystemPrompt();
   
   if (userContext.includes('greeting')) {
-    return basePrompt + `\n\nCURRENT CONTEXT: User is greeting you. Lead with [action:Wink_great_with_hand] followed by a talking action.`;
+    return basePrompt + `\n\nCURRENT CONTEXT: User is greeting you. Lead with [action:wink_great_with_hand] followed by a talking action.`;
   }
   
   if (userContext.includes('emotional')) {
@@ -170,7 +170,7 @@ function getLanguageFromUserContext() {
 export function validateSegments(segments) {
   const TALKING_ACTIONS = ['talking_happy', 'talking_sadly', 'talking_lips_moment'];
   const PHYSICAL_ACTIONS = [
-    'Wink_great_with_hand', 'touching_her_hair', 'shy', 'surprised_and_smiling',
+    'wink_great_with_hand', 'touching_her_hair', 'shy', 'surprised_and_smiling',
     'think', 'moving hand', 'playing', 'blink', 'laugh', 'yawning_and_sleeping'
   ];
 
