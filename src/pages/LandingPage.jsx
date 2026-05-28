@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Phone, Sparkles } from 'lucide-react';
 import '../styles/landing.css';
 
-const WINK_FRAMES   = 98;
-const PLAYING_FRAMES = 98;
+const TOTAL_FRAMES = 98;
+const ANIM = 'touching_her_hair';
 
 // ── Intersection Observer reveal ──────────────────────────────────────────────
 function useReveal() {
@@ -23,13 +23,9 @@ function useReveal() {
 }
 
 export default function LandingPage({ onStartCall }) {
-  // Single frame state: wink frames 1-98, then playing frames 1-98
-  const [phase, setPhase]       = useState('wink');
-  const [winkFrame, setWinkFrame] = useState(1);
-  const [playFrame, setPlayFrame] = useState(1);
+  const [frame, setFrame]             = useState(1);
+  const [isAtTop, setIsAtTop]         = useState(true);
   const [headerReady, setHeaderReady] = useState(false);
-
-  // The tall scroll zone that drives both animations
   const animZoneRef = useRef(null);
 
   // Reveal refs
@@ -48,63 +44,65 @@ export default function LandingPage({ onStartCall }) {
 
   // Preload all frames eagerly
   useEffect(() => {
-    for (let i = 1; i <= WINK_FRAMES; i++) {
+    for (let i = 1; i <= TOTAL_FRAMES; i++) {
       const img = new Image();
-      img.src = `/avatar/wink_great_with_hand/wink_great_with_hand_${i}.jpg`;
-    }
-    for (let i = 1; i <= PLAYING_FRAMES; i++) {
-      const img = new Image();
-      img.src = `/avatar/playing/playing_${i}.jpg`;
+      img.src = `/avatar/${ANIM}/${ANIM}_${i}.jpg`;
     }
   }, []);
 
-  // ── Single scroll listener driving BOTH animations ────────────────────────
-  // Zone is 500vh tall. Sticky hero = 100vh.
-  // Scroll 0 → midpoint   → wink   frames 1→98  (forward) / 98→1 (reverse)
-  // Scroll midpoint → end → playing frames 1→98  (forward) / 98→1 (reverse)
+  // ── Auto-loop first 17 frames when not scrolling (idle at top) ─────────────
+  useEffect(() => {
+    if (!isAtTop) return;
+
+    let current = 1;
+    let direction = 1; // 1 for forward, -1 for backward
+
+    const interval = setInterval(() => {
+      current += direction;
+      if (current >= 17) {
+        current = 17;
+        direction = -1;
+      } else if (current <= 1) {
+        current = 1;
+        direction = 1;
+      }
+      setFrame(current);
+    }, 100); // Smooth loop
+
+    return () => clearInterval(interval);
+  }, [isAtTop]);
+
+  // ── Scroll-driven frame animation (bidirectional) ─────────────────────────
   useEffect(() => {
     const handleScroll = () => {
       const el = animZoneRef.current;
       if (!el) return;
 
-      const scrollTop     = window.scrollY;
-      const vh            = window.innerHeight;
-      const zoneTop       = el.offsetTop;           // where the zone starts on the page
-      const zoneHeight    = el.offsetHeight;        // actual rendered height (≈ 500vh in px)
-      const totalScrollable = zoneHeight - vh;      // scrollable range inside the zone
-      const midpoint      = totalScrollable / 2;    // wink ends / playing begins
+      const scrollTop      = window.scrollY;
+      const vh             = window.innerHeight;
+      const zoneTop        = el.offsetTop;
+      const totalScrollable = el.offsetHeight - vh;          // ≈ 400vh in px
+      const scrollInZone   = Math.max(0, Math.min(totalScrollable, scrollTop - zoneTop));
 
-      // How far the user has scrolled WITHIN the zone (clamped to zone bounds)
-      const scrollInZone = Math.max(0, Math.min(totalScrollable, scrollTop - zoneTop));
-
-      if (scrollInZone <= midpoint) {
-        // ── Wink phase (first half) ──
-        const progress = midpoint > 0 ? scrollInZone / midpoint : 0;
-        const frame = Math.max(1, Math.min(WINK_FRAMES, Math.floor(progress * WINK_FRAMES) + 1));
-        setPhase('wink');
-        setWinkFrame(frame);
+      if (scrollTop <= 10) {
+        setIsAtTop(true);
       } else {
-        // ── Playing phase (second half) ──
-        const playProgress = midpoint > 0 ? (scrollInZone - midpoint) / midpoint : 0;
-        const frame = Math.max(1, Math.min(PLAYING_FRAMES, Math.floor(playProgress * PLAYING_FRAMES) + 1));
-        setPhase('play');
-        setPlayFrame(frame);
+        setIsAtTop(false);
+        const progress  = totalScrollable > 0 ? scrollInZone / totalScrollable : 0;
+        const startVal  = 17;
+        const endVal    = TOTAL_FRAMES;
+        const nextFrame = Math.max(startVal, Math.min(endVal, Math.floor(progress * (endVal - startVal)) + startVal));
+        setFrame(nextFrame);
       }
     };
 
     window.addEventListener('scroll', handleScroll, { passive: true });
-    // Delay the initial call until after paint so offsetHeight is correct
     const raf = requestAnimationFrame(handleScroll);
     return () => {
       window.removeEventListener('scroll', handleScroll);
       cancelAnimationFrame(raf);
     };
   }, []);
-
-  // Image driven by phase + frame
-  const imgSrc = phase === 'wink'
-    ? `/avatar/wink_great_with_hand/wink_great_with_hand_${winkFrame}.jpg`
-    : `/avatar/playing/playing_${playFrame}.jpg`;
 
   return (
     <div className="landing-container">
@@ -117,7 +115,7 @@ export default function LandingPage({ onStartCall }) {
       <header className={`header glass-card ${headerReady ? 'header-ready' : 'header-hidden'}`}>
         <div className="header-content">
           <div className="logo">
-            <Sparkles size={22} className="logo-icon" />
+            <img src="/sara.jpeg" alt="Sana Logo" className="logo-img" />
             <span>Sana</span>
           </div>
           <button className="header-cta" onClick={onStartCall}>Start Call</button>
@@ -126,32 +124,50 @@ export default function LandingPage({ onStartCall }) {
 
       <main className="main-content">
 
-        {/* ── ANIMATION ZONE (500vh) ── sticky hero inside ── */}
+        {/* ── ANIMATION ZONE (500vh tall, sticky frame image inside) ── */}
         <div ref={animZoneRef} className="anim-zone">
           <div className="sticky-hero">
-            {/* Frame image */}
             <img
-              src={imgSrc}
+              src={`/avatar/${ANIM}/${ANIM}_${frame}.jpg`}
               alt="Sana"
               className="frame-bg-image"
               loading="eager"
             />
-
-            {/* Dark gradient vignette */}
             <div className="frame-bg-overlay"></div>
+            
+            {/* Source of light from the left */}
+            <div className="left-light-source"></div>
 
-            {/* Phase labels */}
-            <div className="scroll-phase-label">
-              {phase === 'wink'
-                ? <><span>👋</span> Greeting  · frame {winkFrame}/{WINK_FRAMES}</>
-                : <><span>✨</span> Exploring · frame {playFrame}/{PLAYING_FRAMES}</>
-              }
+            {/* Content overlay on the right */}
+            <div className="hero-right-content">
+              <div className="tag">
+                <Sparkles size={14} />
+                <span>Next-Gen AI Companion</span>
+              </div>
+              <h1>Talk to Sana</h1>
+              <p>
+                An emotional voice-to-voice AI companion that feels alive. Sana reacts dynamically to your presence, voice, and expressions in real-time.
+              </p>
+              <div className="btn-container">
+                <button className="cta-button" onClick={onStartCall}>
+                  <Phone size={18} />
+                  <span>Start Call</span>
+                </button>
+              </div>
             </div>
 
-            {/* Scroll hint */}
+             {/* Scroll hint at bottom */}
             <div className="hero-scroll-hint">
-              <span>Scroll to animate — reverse to rewind</span>
+              <span>Scroll to animate</span>
               <div className="scroll-arrow">↓</div>
+            </div>
+
+            {/* Pure black text over white patti infinite play */}
+            <div className="ticker-wrap">
+              <div className="ticker-content">
+                <span className="ticker-item">SANA AI • NEXT-GEN EMOTIONAL COMPANION • TALK NATURALLY • REAL-TIME VOICE RESPONSE • EXPRESSIVE EMOTIONS • </span>
+                <span className="ticker-item">SANA AI • NEXT-GEN EMOTIONAL COMPANION • TALK NATURALLY • REAL-TIME VOICE RESPONSE • EXPRESSIVE EMOTIONS • </span>
+              </div>
             </div>
           </div>
         </div>

@@ -16,13 +16,24 @@ import AudioSyncManager from './utils/audioSyncManager';
 
 export default function App() {
   // ─── Page navigation ─────────────────────────────────────────────────────
-  const [currentPage, setCurrentPage] = useState('landing'); // landing | call
+  const [currentPage, setCurrentPage] = useState(() => {
+    return window.location.pathname === '/call' ? 'call' : 'landing';
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setCurrentPage(window.location.pathname === '/call' ? 'call' : 'landing');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   // ─── API keys ──────────────────────────────────────────────────────────────
   const [groqKey]   = useState(import.meta.env.VITE_GROQ_API_KEY);
   const [groqModel] = useState(import.meta.env.VITE_GROQ_MODEL);
   const [voiceModel] = useState(import.meta.env.VITE_VOICE_MODEL || 'canopylabs/orpheus-v1-english');
   const [voiceName]  = useState(import.meta.env.VITE_VOICE_NAME || 'hannah');
-
+ 
   // ─── App state ─────────────────────────────────────────────────────────────
   const [status, setStatus] = useState('idle'); // idle | listening | thinking | speaking
   const [isAsleep, setIsAsleep] = useState(false);
@@ -926,6 +937,7 @@ export default function App() {
     recordUserActivity();
     // Navigate back to landing page
     setTimeout(() => {
+      window.history.pushState({}, '', '/');
       setCurrentPage('landing');
     }, 300);
   };
@@ -962,6 +974,7 @@ export default function App() {
   // Show landing page or call screen based on currentPage state
   if (currentPage === 'landing') {
     return <LandingPage onStartCall={() => {
+      window.history.pushState({}, '', '/call');
       setCurrentPage('call');
       recordUserActivity();
     }} />;
