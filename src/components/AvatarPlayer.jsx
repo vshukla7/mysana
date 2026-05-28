@@ -3,39 +3,39 @@ import { calculateAudioSyncTiming, getFrameDelay } from '../utils/animationAudio
 
 // ─── Frame counts per action ────────────────────────────────────────────────
 const ACTION_FRAMES = {
-  idle:                 98,
-  laugh:                74,
-  playing:              98,
-  think:                74,
-  talking_happy:        98,
-  talking_sadly:        41,
-  talking_lips_moment:  55,
+  idle: 98,
+  laugh: 74,
+  playing: 98,
+  think: 74,
+  talking_happy: 98,
+  talking_sadly: 41,
+  talking_lips_moment: 55,
   yawning_and_sleeping: 81,
   wink_great_with_hand: 98,
-  shy:                  98,
+  shy: 98,
   surprised_and_smiling: 98,
-  touching_her_hair:    98,
-  flying_kiss:          98,
-  kiss_on_screen:       98,
+  touching_her_hair: 98,
+  flying_kiss: 98,
+  kiss_on_screen: 98,
 };
 
 // ─── FPS per action type ─────────────────────────────────────────────────────
 // Talking animations get higher FPS for smooth lip-sync
 const ACTION_FPS = {
-  idle:                 12,
-  laugh:                12,
-  playing:              12,
-  think:                12,
-  talking_happy:        12,
-  talking_sadly:        12,
-  talking_lips_moment:  12,
+  idle: 12,
+  laugh: 12,
+  playing: 12,
+  think: 12,
+  talking_happy: 12,
+  talking_sadly: 12,
+  talking_lips_moment: 12,
   yawning_and_sleeping: 12,
   wink_great_with_hand: 12,
-  shy:                  12,
+  shy: 12,
   surprised_and_smiling: 12,
-  touching_her_hair:    12,
-  flying_kiss:          12,
-  kiss_on_screen:       12,
+  touching_her_hair: 12,
+  flying_kiss: 12,
+  kiss_on_screen: 12,
 };
 
 // ─── Action behaviour types ───────────────────────────────────────────────────
@@ -74,16 +74,18 @@ export default function AvatarPlayer({
   const canvasRef = useRef(null);
 
   // ─── Displayable state ─────────────────────────────────────────────────────
-  const [action, setAction]             = useState('idle');
-  const [frameIndex, setFrameIndex]     = useState(1);
-  const [isReversing, setIsReversing]   = useState(false);
+  const [action, setAction] = useState('idle');
+  const [frameIndex, setFrameIndex] = useState(1);
+  const [isReversing, setIsReversing] = useState(false);
+  const [isFrozen, setIsFrozen] = useState(false); // NEW: Frozen on last frame during sleep
 
   // ─── Internal loop state (refs avoid stale closures in setTimeout) ─────────
   const stateRef = useRef({
-    action:      'idle',
-    frameIndex:  1,
+    action: 'idle',
+    frameIndex: 1,
     isReversing: false,
-    nextAction:  null,
+    nextAction: null,
+    isFrozen: false, // NEW: Stay on last frame
     // Audio sync state
     audioStartTime: null,
     audioSyncTiming: null,
@@ -95,7 +97,7 @@ export default function AvatarPlayer({
 
   // Track audio duration for animation sync
   const audioDurationRef = useRef(audioDuration);
-  useEffect(() => { 
+  useEffect(() => {
     audioDurationRef.current = audioDuration;
     // When audio duration changes (new audio starting), calculate sync timing
     if (audioDuration > 0 && isSpeakingRef.current) {
@@ -113,9 +115,17 @@ export default function AvatarPlayer({
   const isAsleepRef = useRef(isAsleep);
   useEffect(() => {
     isAsleepRef.current = isAsleep;
-    if (!isAsleep && stateRef.current.action === 'yawning_and_sleeping' && stateRef.current.frameIndex === (ACTION_FRAMES['yawning_and_sleeping'] || 81)) {
-      console.log('[AvatarPlayer] ☀️ Awake triggered! Reversing sleep animation...');
+    if (isAsleep && stateRef.current.action === 'yawning_and_sleeping') {
+      // Going to sleep: freeze on last frame when animation finishes
+      console.log('[AvatarPlayer] 😴 Going to sleep... will freeze on last frame.');
+      stateRef.current.isFrozen = false; // Will freeze when animation reaches last frame
+      setIsFrozen(false);
+    } else if (!isAsleep && stateRef.current.isFrozen && stateRef.current.action === 'yawning_and_sleeping') {
+      // Waking up: start reversing from frozen last frame
+      console.log('[AvatarPlayer] ☀️ Wake up triggered! Reversing from frozen sleep frame...');
+      stateRef.current.isFrozen = false;
       stateRef.current.isReversing = true;
+      setIsFrozen(false);
       setIsReversing(true);
     }
   }, [isAsleep]);
@@ -188,9 +198,9 @@ export default function AvatarPlayer({
     if (isInstantCut) {
       console.log(`[AvatarPlayer] ⚡ Instant cut → "${currentAction}" (base pose)`);
       cur.isReversing = false;
-      cur.nextAction  = null;
-      cur.frameIndex  = 1;
-      cur.action      = currentAction;
+      cur.nextAction = null;
+      cur.frameIndex = 1;
+      cur.action = currentAction;
       setAction(currentAction);
       setIsReversing(false);
       setFrameIndex(1);
@@ -198,7 +208,7 @@ export default function AvatarPlayer({
       // ── Always queue smooth transition
       // This reverses the current action back to frame 1 before switching
       console.log(`[AvatarPlayer] 🔄 Queuing smooth transition → "${currentAction}"`);
-      cur.nextAction  = currentAction;
+      cur.nextAction = currentAction;
       cur.isReversing = true;
       setIsReversing(true);
     }
@@ -219,21 +229,21 @@ export default function AvatarPlayer({
       return;
     }
 
-    const dpr      = window.devicePixelRatio || 1;
+    const dpr = window.devicePixelRatio || 1;
     const displayW = canvas.clientWidth;
     const displayH = canvas.clientHeight;
-    const bufferW  = Math.round(displayW * dpr);
-    const bufferH  = Math.round(displayH * dpr);
+    const bufferW = Math.round(displayW * dpr);
+    const bufferH = Math.round(displayH * dpr);
 
     if (canvas.width !== bufferW || canvas.height !== bufferH) {
-      canvas.width  = bufferW;
+      canvas.width = bufferW;
       canvas.height = bufferH;
     }
 
-    ctx.imageSmoothingEnabled  = true;
-    ctx.imageSmoothingQuality  = 'high';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
-    const imgRatio    = img.naturalWidth / img.naturalHeight;
+    const imgRatio = img.naturalWidth / img.naturalHeight;
     const canvasRatio = bufferW / bufferH;
     let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
 
@@ -255,14 +265,14 @@ export default function AvatarPlayer({
     const updateFrame = () => {
       const cur = stateRef.current;
       const totalFrames = ACTION_FRAMES[cur.action] || 64;
-      let fps         = ACTION_FPS[cur.action]    || 12;
-      let delay       = 1000 / fps;
+      let fps = ACTION_FPS[cur.action] || 12;
+      let delay = 1000 / fps;
 
       // ── AUDIO-SYNCED TIMING for talking animations ──────────────────────
-      const isTalkingAction = cur.action === 'talking_happy' || 
-                             cur.action === 'talking_sadly' || 
-                             cur.action === 'talking_lips_moment';
-      
+      const isTalkingAction = cur.action === 'talking_happy' ||
+        cur.action === 'talking_sadly' ||
+        cur.action === 'talking_lips_moment';
+
       if (isTalkingAction && cur.audioSyncTiming && cur.audioStartTime && isSpeakingRef.current) {
         const elapsedMs = Date.now() - cur.audioStartTime;
         const elapsedSeconds = elapsedMs / 1000;
@@ -309,7 +319,7 @@ export default function AvatarPlayer({
         // ── Reversing back to frame 1
         const prevFrame = cur.frameIndex - 1;
         if (prevFrame <= 1) {
-          cur.frameIndex  = 1;
+          cur.frameIndex = 1;
           cur.isReversing = false;
           setIsReversing(false);
           const wasSleepReverse = (cur.action === 'yawning_and_sleeping');
@@ -326,12 +336,12 @@ export default function AvatarPlayer({
               sfx.play().catch(e => console.error('[AvatarPlayer] SFX failed:', e));
             }
 
-            cur.action     = next;
+            cur.action = next;
             cur.nextAction = null;
             cur.audioSyncTiming = null; // Reset audio sync for new action
             cur.audioStartTime = null;
             setAction(next);
-            } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action) || LOOP_ONLY_ACTIONS.has(cur.action))) {
+          } else if (currentActionRef.current !== 'idle' && currentActionRef.current === cur.action && (IDLE_ACTIONS.has(cur.action) || LOOP_ACTIONS.has(cur.action) || LOOP_ONLY_ACTIONS.has(cur.action))) {
             // ── Keep looping the active requested action (except default idle)
             // No state change needed, it will naturally play forward
           } else {
@@ -366,12 +376,21 @@ export default function AvatarPlayer({
 
           if (nextFrame > maxFrames) {
             if (cur.action === 'yawning_and_sleeping' && isAsleepRef.current) {
-              // Freeze at the last frame
+              // Freeze at the last frame - avatar is now sleeping
               cur.frameIndex = totalFrames;
+              if (!cur.isFrozen) {
+                cur.isFrozen = true;
+                setIsFrozen(true);
+                console.log('[AvatarPlayer] 😴 Avatar frozen on last frame (sleeping).');
+              }
+              setFrameIndex(cur.frameIndex);
+              drawFrame(cur.action, cur.frameIndex);
+              // Don't schedule next frame update - stay frozen
+              return;
             } else if (cur.nextAction) {
               // Queued action waiting — start reversing
               cur.isReversing = true;
-              cur.frameIndex  = maxFrames - 1;
+              cur.frameIndex = maxFrames - 1;
               setIsReversing(true);
               isClickedGestureRef.current = false;
 
@@ -382,14 +401,14 @@ export default function AvatarPlayer({
             } else if (IDLE_ACTIONS.has(cur.action)) {
               // ── Idle ping-pong: reverse direction
               cur.isReversing = true;
-              cur.frameIndex  = maxFrames - 1;
+              cur.frameIndex = maxFrames - 1;
               setIsReversing(true);
               isClickedGestureRef.current = false;
 
             } else {
               // ── Play-once action complete: reverse back to idle
               cur.isReversing = true;
-              cur.frameIndex  = maxFrames - 1;
+              cur.frameIndex = maxFrames - 1;
               setIsReversing(true);
               isClickedGestureRef.current = false;
               if (onActionComplete) onActionComplete(cur.action);
@@ -441,13 +460,13 @@ export default function AvatarPlayer({
       // Instant cut for loop actions, smooth for others
       if (LOOP_ACTIONS.has(act) || LOOP_ONLY_ACTIONS.has(act) || IDLE_ACTIONS.has(cur.action)) {
         cur.isReversing = false;
-        cur.nextAction  = null;
-        cur.frameIndex  = 1;
-        cur.action      = act;
+        cur.nextAction = null;
+        cur.frameIndex = 1;
+        cur.action = act;
         setAction(act);
         setIsReversing(false);
       } else {
-        cur.nextAction  = act;
+        cur.nextAction = act;
         cur.isReversing = true;
         setIsReversing(true);
       }
@@ -467,7 +486,7 @@ export default function AvatarPlayer({
 
     // Transition to the clicked action
     if (cur.action !== act) {
-      cur.nextAction  = act;
+      cur.nextAction = act;
       cur.isReversing = true;
       setIsReversing(true);
     } else {
@@ -557,7 +576,7 @@ export default function AvatarPlayer({
           borderRadius: '50%',
           boxShadow: '0 0 10px #30d158',
         }} />
-        Sara
+        sana
       </div>
     </div>
   );

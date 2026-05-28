@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Groq } from 'groq-sdk';
-import { Mic, MicOff, Volume2, VolumeX, PhoneOff } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, PhoneOff, Moon, LogOut } from 'lucide-react';
 import AvatarPlayer from './components/AvatarPlayer';
+import LandingPage from './pages/LandingPage';
 import { parseSegment } from './utils/responseParser';
 import AvatarStateManager from './utils/avatarStateManager';
 import { 
@@ -14,6 +15,8 @@ import {
 import AudioSyncManager from './utils/audioSyncManager';
 
 export default function App() {
+  // ─── Page navigation ─────────────────────────────────────────────────────
+  const [currentPage, setCurrentPage] = useState('landing'); // landing | call
   // ─── API keys ──────────────────────────────────────────────────────────────
   const [groqKey]   = useState(import.meta.env.VITE_GROQ_API_KEY);
   const [groqModel] = useState(import.meta.env.VITE_GROQ_MODEL);
@@ -120,6 +123,13 @@ export default function App() {
 
   useEffect(() => {
     const interval = setInterval(() => {
+      // Block idle checks and proactive triggers if not on the call screen or conversation hasn't started
+      const conversationStarted = messages.some(m => m.role === 'user');
+      if (currentPage !== 'call' || !conversationStarted) {
+        recordSystemActivity();
+        return;
+      }
+
       // If we are currently talking, thinking, or in wakeup transition, reset the idle timer
       if (isAsleep || isWakingUp || isBusyRef.current || status === 'speaking' || status === 'thinking') {
         recordSystemActivity();
@@ -145,7 +155,7 @@ export default function App() {
     }, 2000);
 
     return () => clearInterval(interval);
-  }, [isAsleep, isWakingUp, status]);
+  }, [isAsleep, isWakingUp, status, currentPage, messages]);
 
   // ─── Toggle continuous mic ─────────────────────────────────────────────────
   const toggleContinuousMic = () => {
@@ -903,7 +913,7 @@ export default function App() {
     setIsSpeaking(false);
   };
 
-  // ─── Reset conversation ────────────────────────────────────────────────────
+  // ─── Reset conversation & go back to landing ────────────────────────────
   const handleReset = () => {
     stopSpeechAndQueue();
     setIsAsleep(false);
@@ -911,8 +921,28 @@ export default function App() {
     setStatus('idle');
     setActiveAction('idle');
     setMessages([{ role: 'system', content: 'Conversation reset. Ready for your input.' }]);
-    console.log('[App] Conversation reset.');
+    setIsContinuousMic(false);
+    console.log('[App] 📞 Ending call and returning to landing page.');
     recordUserActivity();
+    // Navigate back to landing page
+    setTimeout(() => {
+      setCurrentPage('landing');
+    }, 300);
+  };
+
+  // ─── Manual sleep toggle ────────────────────────────────────────────────
+  const toggleSleep = () => {
+    recordUserActivity();
+    if (isAsleepRef.current) {
+      console.log('[App] 👀 Manual wake up triggered!');
+      setIsAsleep(false);
+      setActiveAction('idle');
+    } else {
+      console.log('[App] 😴 Manual sleep triggered!');
+      setIsAsleep(true);
+      setActiveAction('yawning_and_sleeping');
+      stopSpeechAndQueue();
+    }
   };
 
   const toggleSpeaker = () => {
@@ -929,10 +959,23 @@ export default function App() {
   };
 
   // ─── Render ────────────────────────────────────────────────────────────────
+  // Show landing page or call screen based on currentPage state
+  if (currentPage === 'landing') {
+    return <LandingPage onStartCall={() => {
+      setCurrentPage('call');
+      recordUserActivity();
+    }} />;
+  }
+
   return (
     <div className="call-screen">
       {/* Avatar */}
-      <div className="avatar-fullscreen">
+      <div className="avatar-fullscreen" onClick={() => {
+        if (isAsleepRef.current) {
+          console.log('[App] 🖱️ Screen clicked while asleep. Waking up...');
+          wakeUpAvatar();
+        }
+      }}>
         <AvatarPlayer
           currentAction={activeAction}
           isSpeaking={isSpeaking}
@@ -957,13 +1000,25 @@ export default function App() {
       {/* Controls */}
       <div className="call-bottom-bar">
         <div className="call-controls">
-          {/* Speaker */}
+          {/* Speaker / Mute Button - Shows clear icon when muted */}
           <button
-            className={`ctrl-btn speaker ${speakerMuted ? '' : 'active'}`}
+            className={`ctrl-btn speaker ${speakerMuted ? 'muted' : 'active'}`}
             onClick={toggleSpeaker}
             title={speakerMuted ? 'Unmute speaker' : 'Mute speaker'}
           >
-            {speakerMuted ? <VolumeX size={24} /> : <Volume2 size={24} />}
+            <div className="speaker-icon">
+              {speakerMuted ? <VolumeX size={24} /> : <Volume2 size={24} />}
+              {speakerMuted && <div className="mute-indicator">🔇</div>}
+            </div>
+          </button>
+
+          {/* Sleep Button */}
+          <button
+            className={`ctrl-btn sleep ${isAsleep ? 'sleeping' : ''}`}
+            onClick={toggleSleep}
+            title={isAsleep ? 'Wake up' : 'Sleep'}
+          >
+            <Moon size={24} />
           </button>
 
           {/* Mic */}
@@ -975,9 +1030,13 @@ export default function App() {
             {isContinuousMic ? <MicOff size={28} /> : <Mic size={28} />}
           </button>
 
-          {/* End / Reset */}
-          <button className="ctrl-btn end-call" onClick={handleReset} title="Reset conversation">
-            <PhoneOff size={22} />
+          {/* Hang Up / End Call */}
+          <button 
+            className="ctrl-btn end-call" 
+            onClick={handleReset} 
+            title="End call and return to home"
+          >
+            <LogOut size={22} />
           </button>
         </div>
       </div>
